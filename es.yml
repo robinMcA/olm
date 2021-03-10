@@ -1,0 +1,91 @@
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: elasticsearch-sample
+spec:
+  version: 7.11.0
+  http:
+    service:
+      spec:
+        type: NodePort
+    # tls:
+    #   selfSignedCertificate:
+    #     disabled: true
+  nodeSets:
+    - name: default
+      config:
+        node.roles:
+          - master
+          - data
+        node.attr.attr_name: attr_value
+        node.store.allow_mmap: false
+      podTemplate:
+        metadata:
+          labels:
+            foo: bar
+        spec:
+          containers:
+            - name: elasticsearch
+              resources:
+                requests:
+                  memory: 4Gi
+                  cpu: 1
+                limits:
+                  memory: 4Gi
+                  cpu: 2
+      count: 3
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    kubernetes.io/tls-acme: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+  name: es-ingress.local
+spec:
+  rules:
+  - host: ingress.local
+    http:
+      paths:
+      - backend:
+          serviceName: kibana-sample-kb-http
+          servicePort: https
+  - http:
+      paths:
+      - backend:
+          serviceName: elasticsearch-sample-es-http
+          servicePort: https
+  tls:
+  - hosts:
+    - ingress.local
+---
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: kibana-sample
+spec:
+  version: 7.11.0
+  count: 1
+  elasticsearchRef:
+    name: elasticsearch-sample
+  http:
+    service:
+      spec:
+        type: NodePort
+  podTemplate:
+    metadata:
+      labels:
+        foo: bar
+    spec:
+      containers:
+        - name: kibana
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 0.5
+            limits:
+              memory: 2Gi
+              cpu: 2
+---

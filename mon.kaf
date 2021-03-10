@@ -1,0 +1,229 @@
+apiVersion: beat.k8s.elastic.co/v1beta1
+kind: Beat
+metadata:
+  name: metricbeat
+spec:
+  type: metricbeat
+  version: 7.11.1
+  config:
+    output.elasticsearch:
+      username: "elastic"
+      password: "yolo"
+      hosts:
+        - 172.18.0.2:30687
+      ssl:
+        enable: false
+    metricbeat:
+      autodiscover:
+        providers:
+        - hints:
+            default_config: {}
+            enabled: "true"
+          host: ${NODE_NAME}
+          type: kubernetes
+      modules:
+      - module: system
+        period: 10s
+        metricsets:
+        - cpu
+        - load
+        - memory
+        - network
+        - process
+        - process_summary
+        process:
+          include_top_n:
+            by_cpu: 5
+            by_memory: 5
+        processes:
+        - .*
+      - module: system
+        period: 1m
+        metricsets:
+        - filesystem
+        - fsstat
+        processors:
+        - drop_event:
+            when:
+              regexp:
+                system:
+                  filesystem:
+                    mount_point: ^/(sys|cgroup|proc|dev|etc|host|lib)($|/)
+      - module: kubernetes
+        period: 10s
+        host: ${NODE_NAME}
+        hosts:
+        - https://${NODE_NAME}:10250
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        ssl:
+          verification_mode: none
+        metricsets:
+        - node
+        - system
+        - pod
+        - container
+        - volume
+      # Kubernetes proxy server
+      # (when running metricbeat locally at hosts or as a daemonset + host network)
+      - module: kubernetes
+        enabled: true
+        metricsets:
+          - proxy
+        hosts: ["localhost:10249"]
+        period: 10s
+    processors:
+    - add_cloud_metadata: {}
+    - add_host_metadata: {}
+    - drop_fields:
+        ignore_missing: true
+        fields: 
+        # Agent fields aren't particularly useful so exclude them all.
+        - agent.ephemeral_id
+        - agent.hostname
+        - agent.id
+        - agent.type
+        - agent.version
+        - agent.name
+        # This is the Elastic schema version, doesn't seem that useful
+        - ecs.version
+        # This just says container which isn't useful
+        - input.type
+        # This says stderr or stdin, doesn't matter
+        - stream
+        # Hostname is at host.name
+        - kubernetes.node.hostname
+        # For AWS this is the same as the hostname
+        - kubernetes.node.name
+        # These Kuberentes Node labels are present in the cloud metadata, so excluding them
+        - kubernetes.node.labels.beta_kubernetes_io/instance-type
+        - kubernetes.node.labels.topology_kubernetes_io/zone
+        - kubernetes.node.labels.beta_kubernetes_io/arch
+        - kubernetes.node.labels.failure-domain_beta_kubernetes_io/region
+        - kubernetes.node.labels.kubernetes_io/hostname
+        - kubernetes.node.labels.kubernetes_io/arch
+        - kubernetes.node.labels.eks_amazonaws_com/nodegroup-image
+        - kubernetes.node.labels.node_kubernetes_io/instance-type
+        - kubernetes.node.labels.topology_kubernetes_io/region
+        - kubernetes.node.labels.failure-domain_beta_kubernetes_io/zone
+        - kubernetes.node.labels.kubernetes_io/os
+        - kubernetes.node.labels.beta_kubernetes_io/os
+        # Container image name is over at kubernetes.container.name
+        - container.image.name
+        # MAC addresses don't seem to be useful, and are very long
+        - host.mac
+        # Same as host.name
+        - host.hostname
+  daemonSet:
+    podTemplate:
+      spec:
+        serviceAccountName: metricbeat
+        automountServiceAccountToken: true # some older Beat versions are depending on this settings presence in k8s context
+        containers:
+        - args:
+          - -e
+          - -c
+          - /etc/beat.yml
+          - -system.hostfs=/hostfs
+          name: metricbeat
+          volumeMounts:
+          - mountPath: /hostfs/sys/fs/cgroup
+            name: cgroup
+          - mountPath: /var/run/docker.sock
+            name: dockersock
+          - mountPath: /hostfs/proc
+            name: proc
+          env:
+          - name: ELASTICSEARCH_HOST
+            value: https://172.18.0.2
+          - name: ELASTICSEARCH_PORT
+            value: "30687"
+          - name: ELASTICSEARCH_USERNAME
+            value: elastic
+          - name: ELASTICSEARCH_PASSWORD
+            value: yolo
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        dnsPolicy: ClusterFirstWithHostNet
+        hostNetwork: true # Allows to provide richer host metadata
+        securityContext:
+          runAsUser: 0
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - hostPath:
+            path: /sys/fs/cgroup
+          name: cgroup
+        - hostPath:
+            path: /var/run/docker.sock
+          name: dockersock
+        - hostPath:
+            path: /proc
+          name: proc
+---
+# permissions needed for metricbeat
+# source: https://www.elastic.co/guide/en/beats/metricbeat/current/metricbeat-module-kubernetes.html
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metricbeat
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - namespaces
+  - events
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - "extensions"
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  - deployments
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/stats
+  - nodes/metrics
+  verbs:
+  - get
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metricbeat
+  namespace: elastic-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metricbeat
+subjects:
+- kind: ServiceAccount
+  name: metricbeat
+  namespace: elastic-system
+roleRef:
+  kind: ClusterRole
+  name: metricbeat
+  apiGroup: rbac.authorization.k8s.io          
